@@ -1,0 +1,98 @@
+# =============================================================================
+# Qdrant — vector store for semantic retrieval, as its own stack.
+# =============================================================================
+# Split out of best/vanna/docker-compose.yml so the index outlives any one
+# consumer: `docker compose down -v` in the Vanna stack no longer takes the
+# collection with it, and a second consumer can share one index instead of
+# running a second copy.
+#
+# PREREQUISITE: the sandbox must be running first. It owns multidb_network,
+# which this stack joins but never creates, so starting out of order fails
+# immediately with
+# "network multidb_network declared as external, but could not be found".
+#
+#   cd ../databases && docker compose up -d
+#   docker compose up -d
+#
+#   Dashboard  http://127.0.0.1:6333/dashboard
+#   Collections http://127.0.0.1:6333/collections
+#
+# Consumers on multidb_network reach it as `http://qdrant:6333` — the same URL
+# best/vanna already defaults VANNA_QDRANT_URL to, because Compose registers the
+# *service* name as a network alias on every network it joins, external ones
+# included. Nothing in the Vanna stack's configuration has to change.
+#
+# One thing does: delete (or comment out) the `qdrant` service in
+# best/vanna/docker-compose.yml before running both. Its `api` joins that
+# stack's `default` network as well as the sandbox, so with both running the
+# name `qdrant` is ambiguous and the API may bind to the in-stack copy — a
+# second, empty index that reports healthy and returns no matches. Its
+# `qdrant-data:` volume entry becomes orphaned and can go at the same time.
+# =============================================================================
+
+name: vectordb
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Qdrant — one collection per workspace, written by every API worker
+  # ---------------------------------------------------------------------------
+  # A server rather than Qdrant's embedded mode because several API workers write
+  # to the index; embedded mode is one directory with one lock, and the second
+  # worker to open it fails.
+  qdrant:
+    # Pinned by digest as well as tag. Changing this can make existing storage
+    # unreadable -- 1.19 refuses segments written by 1.12 and crash-loops. That is
+    # recoverable and cheap because the collection is *derived*:
+    #   docker compose stop qdrant && docker volume rm vectordb_qdrant_data
+    #   docker compose up -d qdrant && vanna knowledge reindex
+    # The markdown under knowledge/ is the source of truth.
+    image: qdrant/qdrant:v1.19.0@sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc
+    container_name: vector_qdrant
+    volumes:
+      - qdrant_data:/qdrant/storage
+    # Bound to loopback, not 0.0.0.0. Qdrant ships with no authentication: a
+    # default `ports: "6333:6333"` publishes an unauthenticated read/write vector
+    # store to every host on the LAN. Loopback keeps the dashboard and host-side
+    # `vanna knowledge reindex` working; container-to-container traffic does not
+    # use this mapping at all and is unaffected by narrowing it.
+    ports:
+      - "127.0.0.1:${QDRANT_PORT:-6333}:6333"
+    expose:
+      - "6333"
+    restart: unless-stopped
+    healthcheck:
+      # Qdrant's image has no curl or wget, so probe the port from bash.
+      # This proves the listener is up, not that a collection is servable — a
+      # storage-format refusal (see the image comment) shows up in the log and as
+      # a crash loop, not here.
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333'"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - sandbox
+
+# =============================================================================
+# Persistent named volume
+# =============================================================================
+volumes:
+  qdrant_data:
+    # Named explicitly, matching the sandbox's multidb_* convention, so the
+    # recovery command above stays correct no matter what the directory — and
+    # therefore the default project name — is called.
+    name: vectordb_qdrant_data
+
+# =============================================================================
+# Shared network
+# =============================================================================
+networks:
+  # Owned by ../databases. `external` means join it, never create it, so this
+  # stack can never silently start a second, empty network that resolves no
+  # consumer names.
+  sandbox:
+    external: true
+    name: multidb_network
