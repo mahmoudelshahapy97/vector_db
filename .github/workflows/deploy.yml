@@ -1,8 +1,8 @@
 # Continuous delivery for the Qdrant stack.
 #
 #   ci        the whole of ci.yml; nothing ships that fails it
-#   deploy    over SSH: copy docker-compose.yml to the host and run
-#             `docker compose up -d --wait`
+#   deploy    over SSH: copy docker-compose.yml and docker-compose.prod.yml to the
+#             host and run `docker compose -f ... -f ... up -d --wait`
 #
 # Secrets (Settings -> Secrets and variables -> Actions):
 #
@@ -101,8 +101,8 @@ jobs:
       - name: Copy compose file
         run: |
           ssh deploy "mkdir -p $(printf %q "$DEPLOY_PATH")"
-          scp docker-compose.yml "deploy:$DEPLOY_PATH/"
+          scp docker-compose.yml docker-compose.prod.yml "deploy:$DEPLOY_PATH/"
 
       - name: Deploy
         run: |
-          ssh deploy "cd $(printf %q "$DEPLOY_PATH") && docker compose pull && docker compose up -d --wait"
+          ssh deploy "cd $(printf %q "$DEPLOY_PATH") &&             docker compose -f docker-compose.yml -f docker-compose.prod.yml pull &&             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait"
