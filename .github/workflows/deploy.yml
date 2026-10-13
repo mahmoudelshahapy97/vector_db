@@ -1,27 +1,19 @@
-# Continuous delivery.
+# Continuous delivery for the Qdrant stack.
 #
 #   ci        the whole of ci.yml; nothing ships that fails it
-#   publish   build the sqlserver, oracle and sqlite images and push them to Docker
-#             Hub, tagged by commit SHA
-#   deploy    over SSH: sync the compose files and the bind-mounted seed data to the
-#             host, pull those exact images, and `docker compose up -d --wait`
+#   deploy    over SSH: copy docker-compose.yml to the host and run
+#             `docker compose up -d --wait`
 #
 # Secrets (Settings -> Secrets and variables -> Actions):
 #
-#   DOCKERHUB_USERNAME, DOCKERHUB_TOKEN   push here, pull on the host
 #   DEPLOY_HOST, DEPLOY_USER              where to SSH, port 22
 #   DEPLOY_SSH_KEY                        private key; its public half in authorized_keys
 #   DEPLOY_HOST_FINGERPRINT               the host key's SHA256 fingerprint, from
 #                                           ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 #   DEPLOY_PATH                           absolute directory the stack lives in
 #
-# The database passwords never pass through here: they live in $DEPLOY_PATH/.env on
-# the host. See .github/scripts/deploy.sh for what else the host needs (rsync
-# included).
-#
-# These are stateful databases. A deploy never removes volumes, and the seed scripts
-# only run against an empty volume, so changing a loader or its data does not
-# re-seed an existing host: recreate that engine's volume by hand for that.
+# The host must already have Docker Compose v2 and the external multidb_network
+# (started by the databases stack). The qdrant_data volume is never removed.
 
 name: Deploy
 
@@ -45,46 +37,14 @@ jobs:
   ci:
     uses: ./.github/workflows/ci.yml
 
-  publish:
-    needs: ci
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: true
-      matrix:
-        image: [sqlserver, oracle, sqlite]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: ${{ matrix.image }} image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./${{ matrix.image }}
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/multidb-${{ matrix.image }}:${{ github.sha }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/multidb-${{ matrix.image }}:latest
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,scope=${{ matrix.image }},mode=max
-
   deploy:
-    needs: publish
+    needs: ci
     runs-on: ubuntu-24.04
     environment: production
     env:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
       - uses: actions/checkout@v4
 
@@ -92,11 +52,9 @@ jobs:
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_HOST_FINGERPRINT: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           missing=()
-          for v in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_HOST_FINGERPRINT DEPLOY_PATH \
-                   DOCKERHUB_USERNAME DOCKERHUB_TOKEN; do
+          for v in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_HOST_FINGERPRINT DEPLOY_PATH; do
             [ -n "${!v}" ] || missing+=("$v")
           done
           if [ "${#missing[@]}" -gt 0 ]; then
@@ -140,25 +98,11 @@ jobs:
             ServerAliveInterval 30
           EOF
 
-      - name: Sync compose files and seed data
-        # Everything the containers bind-mount from the host. Only changed files
-        # travel; the data directories are over 500 MB.
+      - name: Copy compose file
         run: |
-          ssh deploy "mkdir -p $(printf %q "$DEPLOY_PATH/.deploy")"
-          rsync -az --delete -e ssh \
-            docker-compose.yml docker-compose.prod.yml \
-            postgres mysql sqlserver oracle sqlite \
-            "deploy:$DEPLOY_PATH/"
-          scp .github/scripts/deploy.sh "deploy:$DEPLOY_PATH/.deploy/"
+          ssh deploy "mkdir -p $(printf %q "$DEPLOY_PATH")"
+          scp docker-compose.yml "deploy:$DEPLOY_PATH/"
 
       - name: Deploy
-        env:
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          p="$DOCKERHUB_USERNAME/multidb"
-          # The token goes over stdin, never onto a command line.
-          ssh deploy "cd $(printf %q "$DEPLOY_PATH") && bash .deploy/deploy.sh \
-            $(printf %q "$p-sqlserver:$GITHUB_SHA") \
-            $(printf %q "$p-oracle:$GITHUB_SHA") \
-            $(printf %q "$p-sqlite:$GITHUB_SHA") \
-            $(printf %q "$DOCKERHUB_USERNAME")" <<<"$DOCKERHUB_TOKEN"
+          ssh deploy "cd $(printf %q "$DEPLOY_PATH") && docker compose pull && docker compose up -d --wait"
