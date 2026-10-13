@@ -1,0 +1,15 @@
+# Production override: join the sandbox's shared network.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Requires multidb_network to exist already (started by ../databases).
+
+services:
+  qdrant:
+    networks:
+      - sandbox
+
+networks:
+  sandbox:
+    external: true
+    name: multidb_network
