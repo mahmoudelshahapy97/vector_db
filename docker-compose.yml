@@ -6,28 +6,15 @@
 # collection with it, and a second consumer can share one index instead of
 # running a second copy.
 #
-# PREREQUISITE: the sandbox must be running first. It owns multidb_network,
-# which this stack joins but never creates, so starting out of order fails
-# immediately with
-# "network multidb_network declared as external, but could not be found".
+# Standalone: it runs on its own default network, with no external dependencies.
 #
-#   cd ../databases && docker compose up -d
 #   docker compose up -d
 #
 #   Dashboard  http://127.0.0.1:6333/dashboard
 #   Collections http://127.0.0.1:6333/collections
 #
-# Consumers on multidb_network reach it as `http://qdrant:6333` — the same URL
-# best/vanna already defaults VANNA_QDRANT_URL to, because Compose registers the
-# *service* name as a network alias on every network it joins, external ones
-# included. Nothing in the Vanna stack's configuration has to change.
-#
-# One thing does: delete (or comment out) the `qdrant` service in
-# best/vanna/docker-compose.yml before running both. Its `api` joins that
-# stack's `default` network as well as the sandbox, so with both running the
-# name `qdrant` is ambiguous and the API may bind to the in-stack copy — a
-# second, empty index that reports healthy and returns no matches. Its
-# `qdrant-data:` volume entry becomes orphaned and can go at the same time.
+# Other containers reach it as `http://qdrant:6333` by joining this stack's
+# network (vectordb_default) or by publishing through the loopback port above.
 # =============================================================================
 
 name: vectordb
@@ -73,26 +60,13 @@ services:
       retries: 3
     security_opt:
       - no-new-privileges:true
-    networks:
-      - sandbox
 
 # =============================================================================
 # Persistent named volume
 # =============================================================================
 volumes:
   qdrant_data:
-    # Named explicitly, matching the sandbox's multidb_* convention, so the
+    # Named explicitly so the
     # recovery command above stays correct no matter what the directory — and
     # therefore the default project name — is called.
     name: vectordb_qdrant_data
-
-# =============================================================================
-# Shared network
-# =============================================================================
-networks:
-  # Owned by ../databases. `external` means join it, never create it, so this
-  # stack can never silently start a second, empty network that resolves no
-  # consumer names.
-  sandbox:
-    external: true
-    name: multidb_network
